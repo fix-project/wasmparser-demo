@@ -10,16 +10,20 @@ fn main() -> Result<()> {
     let mut functions_to_validate = Vec::new();
 
     for payload in Parser::new(0).parse_all(wasm_bytes.as_bytes()) {
-        if let ValidPayload::Func(func_validator, body) = validator.payload(&payload?)? {
-            functions_to_validate.push((func_validator, body))
+        if let ValidPayload::Func(func_to_validate, body) = validator.payload(&payload?)? {
+            functions_to_validate.push((func_to_validate, body))
         }
     }
 
     // Step 3: go operator-by-operator and validate each function (avoiding the convenience function)
-    for (func_validator, body) in functions_to_validate {
-        func_validator
-            .into_validator(Default::default())
-            .validate(&body)?;
+    for (func_to_validate, body) in functions_to_validate {
+        let mut func_validator = func_to_validate.into_validator(Default::default());
+        let mut reader = body.get_binary_reader();
+        func_validator.read_locals(&mut reader)?;
+        while !reader.eof() {
+            reader.visit_operator(&mut func_validator.visitor(reader.original_position()))??;
+        }
+        reader.finish_expression(&func_validator.visitor(reader.original_position()))?;
     }
 
     Ok(())

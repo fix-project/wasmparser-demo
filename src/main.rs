@@ -19,9 +19,17 @@ fn main() -> Result<()> {
     for (func_to_validate, body) in functions_to_validate {
         let mut func_validator = func_to_validate.into_validator(Default::default());
         let mut reader = body.get_binary_reader();
+        let mut operator_count = 0;
         func_validator.read_locals(&mut reader)?;
         while !reader.eof() {
+            print!("Before operator {operator_count}, here are the operands on the stack:");
+            for depth in 0..func_validator.operand_stack_height() {
+                print!(" {:?}", func_validator.get_operand_type(depth as usize));
+            }
+            println!();
+
             reader.visit_operator(&mut func_validator.visitor(reader.original_position()))??;
+            operator_count += 1;
         }
         reader.finish_expression(&func_validator.visitor(reader.original_position()))?;
     }

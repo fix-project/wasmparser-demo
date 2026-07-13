@@ -10,12 +10,17 @@ fn main() -> Result<()> {
     let mut functions_to_validate = Vec::new();
 
     for payload in Parser::new(0).parse_all(wasm_bytes.as_bytes()) {
-        if let ValidPayload::Func(validator, body) = validator.payload(&payload?)? {
-            functions_to_validate.push((validator, body))
+        if let ValidPayload::Func(func_validator, body) = validator.payload(&payload?)? {
+            functions_to_validate.push((func_validator, body))
         }
     }
 
     // Step 3: go operator-by-operator and validate each function (avoiding the convenience function)
+    for (func_validator, body) in functions_to_validate {
+        func_validator
+            .into_validator(Default::default())
+            .validate(&body)?;
+    }
 
     Ok(())
 }

@@ -1,38 +1,57 @@
 use anyhow::Result;
-use wasmparser::{Parser, ValidPayload, Validator};
+use std::io::{Read, stdin};
+use wasmparser::{
+    Chunk, FuncToValidate, FunctionBody, Parser, ValidPayload, Validator, WasmModuleResources,
+};
 
 fn main() -> Result<()> {
-    // Step 1: read file. (XXX: in the future, stream input to Parser instead of assembling whole module in memory)
-    let wasm_bytes = std::io::read_to_string(std::io::stdin())?;
-
-    // Step 2: use wasmparser Validator on every payload (this will give us a list of functions to validate)
+    // Step 1: parse input, and use Validator on every payload (this will give us a list of functions to validate)
+    let mut parser = Parser::new(0);
     let mut validator = Validator::new();
-    let mut functions_to_validate = Vec::new();
+    let mut buf = Vec::new();
+    let mut eof = false;
 
-    for payload in Parser::new(0).parse_all(wasm_bytes.as_bytes()) {
-        if let ValidPayload::Func(func_to_validate, body) = validator.payload(&payload?)? {
-            functions_to_validate.push((func_to_validate, body))
-        }
-    }
-
-    // Step 3: go operator-by-operator and validate each function (avoiding the convenience function)
-    for (func_to_validate, body) in functions_to_validate {
-        let mut func_validator = func_to_validate.into_validator(Default::default());
-        let mut reader = body.get_binary_reader();
-        let mut operator_count = 0;
-        func_validator.read_locals(&mut reader)?;
-        while !reader.eof() {
-            print!("Before operator {operator_count}, here are the operands on the stack:");
-            for depth in 0..func_validator.operand_stack_height() {
-                print!(" {:?}", func_validator.get_operand_type(depth as usize));
+    loop {
+        match parser.parse(&buf, eof)? {
+            Chunk::NeedMoreData(hint) => {
+                let current_len = buf.len();
+                buf.resize(current_len + hint as usize, 0);
+                let bytes_read = stdin().read(&mut buf[current_len..])?;
+                buf.truncate(current_len + bytes_read);
+                if bytes_read == 0 {
+                    eof = true;
+                }
+                continue;
             }
-            println!();
+            Chunk::Parsed { consumed, payload } => {
+                match validator.payload(&payload)? {
+                    ValidPayload::Func(func_to_validate, body) => handle(func_to_validate, body)?,
+                    ValidPayload::End(_) => return Ok(()),
+                    _ => (),
+                }
 
-            reader.visit_operator(&mut func_validator.visitor(reader.original_position()))??;
-            operator_count += 1;
+                buf.drain(..consumed); // XXX would be better to have some sort of ring buffer
+            }
         }
-        reader.finish_expression(&func_validator.visitor(reader.original_position()))?;
     }
+}
 
+fn handle<'a, T: WasmModuleResources>(f: FuncToValidate<T>, body: FunctionBody<'a>) -> Result<()> {
+    // Step 2: go operator-by-operator and validate each function (avoiding the convenience function)
+    let mut func_validator = f.into_validator(Default::default());
+    let mut reader = body.get_binary_reader();
+    let mut operator_count = 0;
+    func_validator.read_locals(&mut reader)?;
+    while !reader.eof() {
+        print!("Before operator {operator_count}, here are the operands on the stack:");
+        for depth in 0..func_validator.operand_stack_height() {
+            print!(" {:?}", func_validator.get_operand_type(depth as usize));
+        }
+        println!();
+
+        reader.visit_operator(&mut func_validator.visitor(reader.original_position()))??;
+        operator_count += 1;
+    }
+    reader.finish_expression(&func_validator.visitor(reader.original_position()))?;
     Ok(())
 }

@@ -1,44 +1,51 @@
-use anyhow::Result;
-use std::io::{Read, stdin};
+use anyhow::{Result, bail};
+use buffer_redux::Buffer;
+use std::io::stdin;
 use wasmparser::{
-    Chunk, FuncToValidate, FunctionBody, Parser, ValidPayload, Validator, WasmModuleResources,
+    Chunk, FuncToValidate, FuncValidatorAllocations, FunctionBody, Parser, ValidPayload, Validator,
+    WasmModuleResources,
 };
 
 fn main() -> Result<()> {
-    // Step 1: parse input, and use Validator on every payload (this will give us a list of functions to validate)
+    // Step 1: parse input, and use Validator on every payload
     let mut parser = Parser::new(0);
     let mut validator = Validator::new();
-    let mut buf = Vec::new();
+    let mut buf = Buffer::new_ringbuf();
     let mut eof = false;
+    let mut allocs = Default::default();
+    let mut stdin = stdin().lock();
 
     loop {
-        match parser.parse(&buf, eof)? {
-            Chunk::NeedMoreData(hint) => {
-                let current_len = buf.len();
-                buf.resize(current_len + hint as usize, 0);
-                let bytes_read = stdin().read(&mut buf[current_len..])?;
-                buf.truncate(current_len + bytes_read);
-                if bytes_read == 0 {
-                    eof = true;
-                }
-                continue;
-            }
+        match parser.parse(buf.buf(), eof)? {
             Chunk::Parsed { consumed, payload } => {
                 match validator.payload(&payload)? {
-                    ValidPayload::Func(func_to_validate, body) => handle(func_to_validate, body)?,
+                    ValidPayload::Func(f, body) => allocs = handle(f, body, allocs)?,
+                    ValidPayload::Parser(_) => unimplemented!("component model"),
                     ValidPayload::End(_) => return Ok(()),
                     _ => (),
                 }
-
-                buf.drain(..consumed); // XXX would be better to have some sort of ring buffer
+                buf.consume(consumed);
+            }
+            Chunk::NeedMoreData(hint) => {
+                if eof {
+                    bail!("unexpected end");
+                }
+                buf.reserve(hint as usize);
+                if buf.read_from(&mut stdin)? == 0 {
+                    eof = true;
+                }
             }
         }
     }
 }
 
-fn handle<'a, T: WasmModuleResources>(f: FuncToValidate<T>, body: FunctionBody<'a>) -> Result<()> {
-    // Step 2: go operator-by-operator and validate each function (avoiding the convenience function)
-    let mut func_validator = f.into_validator(Default::default());
+fn handle<T: WasmModuleResources>(
+    f: FuncToValidate<T>,
+    body: FunctionBody<'_>,
+    allocs: FuncValidatorAllocations,
+) -> Result<FuncValidatorAllocations> {
+    // Step 2: go operator-by-operator and validate each function
+    let mut func_validator = f.into_validator(allocs);
     let mut reader = body.get_binary_reader();
     let mut operator_count = 0;
     func_validator.read_locals(&mut reader)?;
@@ -53,5 +60,5 @@ fn handle<'a, T: WasmModuleResources>(f: FuncToValidate<T>, body: FunctionBody<'
         operator_count += 1;
     }
     reader.finish_expression(&func_validator.visitor(reader.original_position()))?;
-    Ok(())
+    Ok(func_validator.into_allocations())
 }

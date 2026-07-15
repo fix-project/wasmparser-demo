@@ -1,135 +1,96 @@
-use core::alloc;
-use std::io;
-use anyhow::Result;
-use wasmparser::{Chunk, FuncValidatorAllocations, Parser, Payload::*, Validator};
+use anyhow::{Result, bail};
+use buffer_redux::{Buffer, policy::ReaderPolicy};
+use std::io::stdin;
+use wasmparser::{
+    Chunk, FuncToValidate, FuncType, FuncValidatorAllocations, FunctionBody, Parser, Payload,
+    ValidPayload, Validator, WasmModuleResources,
+};
 
-fn main() -> Result<()> {
-    parse(io::stdin())?;
-    Ok(())
+struct ModuleState {
+    func_types: Vec<FuncType>,
+    // imports: Vec<Import>,
+    // func_type_ids: Vec<u32>,
+    // TODO: add more
 }
 
-fn parse(mut reader: impl io::Read) -> Result<()> {
-    let mut buf = Vec::new();
-    let mut cur = Parser::new(0);
-    let mut eof = false;
-    let mut stack = Vec::new();
-
+fn main() -> Result<()> {
+    // Step 1: parse input, and use Validator on every payload
+    let mut parser = Parser::new(0);
     let mut validator = Validator::new();
+    let mut buf = Buffer::new_ringbuf();
+    let mut eof = false;
+    let mut allocs = FuncValidatorAllocations::default();
+    let mut stdin = stdin().lock();
 
     loop {
-        let (payload, consumed) = match cur.parse(&buf, eof)? {
+        match parser.parse(buf.buf(), eof)? {
+            Chunk::Parsed { consumed, payload } => {
+                match validator.payload(&payload)? {
+                    ValidPayload::Func(f, body) => allocs = handle(f, body, allocs)?,
+                    ValidPayload::Parser(_) => unimplemented!("component model"),
+                    ValidPayload::End(_) => return Ok(()),
+                    _ => (),
+                }
+
+                match payload {
+                    Payload::Version { .. } => { /* ... */ }
+                    Payload::TypeSection(reader) => { 
+                        for ft in reader.into_iter_err_on_gc_types().flatten() {
+                            println!("{:?}", ft);
+                        }
+                    }
+                    Payload::ImportSection(_) => { /* ... */ }
+                    Payload::FunctionSection(_) => { /* ... */ }
+                    Payload::TableSection(_) => { /* ... */ }
+                    Payload::MemorySection(_) => { /* ... */ }
+                    Payload::TagSection(_) => { /* ... */ }
+                    Payload::GlobalSection(_) => { /* ... */ }
+                    Payload::ExportSection(_) => { /* ... */ }
+                    Payload::StartSection { .. } => { /* ... */ }
+                    Payload::ElementSection(_) => { /* ... */ }
+                    Payload::DataCountSection { .. } => { /* ... */ }
+                    Payload::DataSection(_) => { /* ... */ }
+                    Payload::CodeSectionStart { .. } => { /* ... */ }
+                    Payload::CodeSectionEntry(body) => {
+                    }
+                    _ => unimplemented!(),
+                }
+                buf.consume(consumed);
+            }
             Chunk::NeedMoreData(hint) => {
-                assert!(!eof); // otherwise an error would be returned
-
-                // Use the hint to preallocate more space, then read
-                // some more data into our buffer.
-                //
-                // Note that the buffer management here is not ideal,
-                // but it's compact enough to fit in an example!
-                let len = buf.len();
-                buf.extend((0..hint).map(|_| 0u8));
-                let n = reader.read(&mut buf[len..])?;
-                buf.truncate(len + n);
-                eof = n == 0;
-                continue;
-            }
-
-            Chunk::Parsed { consumed, payload } => (payload, consumed),
-        };
-        
-        match payload {
-            // Sections for WebAssembly modules
-            Version { num, encoding, range } => {
-                validator.version(num, encoding, &range)?;
-            }
-            TypeSection(body) => {
-                validator.type_section(&body)?;
-            }
-            ImportSection(body) => {
-                validator.import_section(&body)?;
-            }
-            FunctionSection(body) => {
-                validator.function_section(&body)?;
-            }
-            TableSection(_) => { /* ... */ }
-            MemorySection(_) => { /* ... */ }
-            TagSection(_) => { /* ... */ }
-            GlobalSection(_) => { /* ... */ }
-            ExportSection(body) => {
-                validator.export_section(&body)?;
-            }
-            StartSection { func, range } => {
-                validator.start_section(func, &range)?;
-            }
-            ElementSection(_) => { /* ... */ }
-            DataCountSection { .. } => { /* ... */ }
-            DataSection(_) => { /* ... */ }
-
-            // Here we know how many functions we'll be receiving as
-            // `CodeSectionEntry`, so we can prepare for that, and
-            // afterwards we can parse and handle each function
-            // individually.
-            CodeSectionStart { count, range, size } => {
-                validator.code_section_start(&range)?;
-            }
-            CodeSectionEntry(body) => {
-                dbg!(&body);
-                let to_validate = dbg!(validator.code_section_entry(&body)?);
-                let allocations = FuncValidatorAllocations::default();
-                let mut validator = to_validate.into_validator(allocations);
-                
-                // TODO: FuncValidator, FuncToValidator(?), difference
-                // let mut locals = Vec::new();
-                for entry in body.get_locals_reader()?.into_iter() {
-                    println!("local: {:?}", entry?);
+                if eof {
+                    bail!("unexpected end");
                 }
-
-                // here we can iterate over `body` to parse the function
-                // and its locals
-                for op in body.get_operators_reader()?.into_iter() {
-                    println!("op: {:?}", op?);
+                buf.reserve(hint as usize);
+                if buf.read_from(&mut stdin)? == 0 {
+                    eof = true;
                 }
             }
-
-            // // Sections for WebAssembly components
-            // InstanceSection(_) => { /* ... */ }
-            // CoreTypeSection(_) => { /* ... */ }
-            // ComponentInstanceSection(_) => { /* ... */ }
-            // ComponentAliasSection(_) => { /* ... */ }
-            // ComponentTypeSection(_) => { /* ... */ }
-            // ComponentCanonicalSection(_) => { /* ... */ }
-            // ComponentStartSection { .. } => { /* ... */ }
-            // ComponentImportSection(_) => { /* ... */ }
-            // ComponentExportSection(_) => { /* ... */ }
-            //
-            // ModuleSection { parser, .. }
-            // | ComponentSection { parser, .. } => {
-            //     stack.push(cur.clone());
-            //     cur = parser.clone();
-            // }
-            //
-            // CustomSection(_) => { /* ... */ }
-
-            // Once we've reached the end of a parser we either resume
-            // at the parent parser or we break out of the loop because
-            // we're done.
-            End(offset) => {
-                validator.end(offset)?;
-                if let Some(parent_parser) = stack.pop() {
-                    cur = parent_parser;
-                } else {
-                    break;
-                }
-            }
-
-            // most likely you'd return an error here
-            unhandled => { dbg!(unhandled); }
         }
-
-        // once we're done processing the payload we can forget the
-        // original.
-        buf.drain(..consumed);
     }
+}
 
-    Ok(())
+// function to validate(?)
+fn handle<T: WasmModuleResources>(
+    f: FuncToValidate<T>,
+    body: FunctionBody<'_>,
+    allocs: FuncValidatorAllocations,
+) -> Result<FuncValidatorAllocations> {
+    // Step 2: go operator-by-operator and validate each function
+    let mut func_validator = f.into_validator(allocs);
+    let mut reader = body.get_binary_reader();
+    let mut operator_count = 0;
+    func_validator.read_locals(&mut reader)?;
+    while !reader.eof() {
+        print!("Before operator {operator_count}, here are the operands on the stack:");
+        for depth in 0..func_validator.operand_stack_height() {
+            print!(" {:?}", func_validator.get_operand_type(depth as usize));
+        }
+        println!();
+
+        reader.visit_operator(&mut func_validator.visitor(reader.original_position()))??;
+        operator_count += 1;
+    }
+    reader.finish_expression(&func_validator.visitor(reader.original_position()))?;
+    Ok(func_validator.into_allocations())
 }

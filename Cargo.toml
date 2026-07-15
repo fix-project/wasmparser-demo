@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.103"
+buffer-redux = "1.1.0"
 wasmparser = "0.253.0"

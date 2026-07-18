@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
-use buffer_redux::{Buffer, policy::ReaderPolicy};
-use std::io::stdin;
+use buffer_redux::{BufReader, BufWriter, Buffer, policy::ReaderPolicy};
+use std::{fmt::write, io::{BufRead, Read, Write, stdin, stdout}, fs::File};
 use wasmparser::{
     Chunk, FuncToValidate, FuncType, FuncValidatorAllocations, FunctionBody, Parser, Payload,
     ValidPayload, Validator, WasmModuleResources,
@@ -12,62 +12,93 @@ struct ModuleState {
     // func_type_ids: Vec<u32>,
     // TODO: add more
 }
+ 
+fn get_input_stream() -> BufReader<impl Read> {
+    BufReader::new_ringbuf(stdin())
+}
 
-fn main() -> Result<()> {
-    // Step 1: parse input, and use Validator on every payload
+fn get_output_stream() -> BufWriter<impl Write> {
+    BufWriter::new_ringbuf(stdout())
+}
+
+fn compile_from_stream(
+    input_stream: &mut BufReader<impl Read>,
+    output_stream: &mut BufWriter<impl Write>
+) -> Result<()> {
     let mut parser = Parser::new(0);
-    let mut validator = Validator::new();
-    let mut buf = Buffer::new_ringbuf();
     let mut eof = false;
+
+    // VALIDATOR stuff
+    let mut validator = Validator::new();
     let mut allocs = FuncValidatorAllocations::default();
-    let mut stdin = stdin().lock();
 
     loop {
-        match parser.parse(buf.buf(), eof)? {
+        // PER PAYLOAD
+        match parser.parse(input_stream.buffer(), eof)? {
             Chunk::Parsed { consumed, payload } => {
                 match validator.payload(&payload)? {
                     ValidPayload::Func(f, body) => allocs = handle(f, body, allocs)?,
                     ValidPayload::Parser(_) => unimplemented!("component model"),
-                    ValidPayload::End(_) => return Ok(()),
-                    _ => (),
+                    ValidPayload::End(_) => break,
+                    _ => { dbg!("-------------"); },
                 }
 
+                // information to produce as stream comes in
                 match payload {
-                    Payload::Version { .. } => { /* ... */ }
-                    Payload::TypeSection(reader) => { 
+                    // Payload::Version
+                    Payload::TypeSection(reader) => {
+                        dbg!("TYPE");
                         for ft in reader.into_iter_err_on_gc_types().flatten() {
-                            println!("{:?}", ft);
+                            ft.codegen(output_stream)?;
                         }
                     }
-                    Payload::ImportSection(_) => { /* ... */ }
-                    Payload::FunctionSection(_) => { /* ... */ }
-                    Payload::TableSection(_) => { /* ... */ }
-                    Payload::MemorySection(_) => { /* ... */ }
-                    Payload::TagSection(_) => { /* ... */ }
-                    Payload::GlobalSection(_) => { /* ... */ }
-                    Payload::ExportSection(_) => { /* ... */ }
-                    Payload::StartSection { .. } => { /* ... */ }
-                    Payload::ElementSection(_) => { /* ... */ }
-                    Payload::DataCountSection { .. } => { /* ... */ }
-                    Payload::DataSection(_) => { /* ... */ }
-                    Payload::CodeSectionStart { .. } => { /* ... */ }
-                    Payload::CodeSectionEntry(body) => {
+                    Payload::ImportSection(_) => { 
+                        dbg!("IMPORT");
                     }
-                    _ => unimplemented!(),
+                    Payload::FunctionSection(_) => { dbg!("FUNCTION"); }
+                    Payload::TableSection(_) => { dbg!("TABLE"); }
+                    Payload::MemorySection(_) => { dbg!("MEMORY"); }
+                    Payload::TagSection(_) => { dbg!("TAG"); }
+                    Payload::GlobalSection(_) => { dbg!("GLOBAL"); }
+                    Payload::ExportSection(_) => { dbg!("EXPORT"); }
+                    Payload::StartSection { .. } => { dbg!("START"); }
+                    Payload::ElementSection(_) => { dbg!("ELEMENT"); }
+                    Payload::DataCountSection { .. } => { dbg!("DATA COUNT"); }
+                    Payload::DataSection(_) => { dbg!("DATA"); }
+                    Payload::CodeSectionStart { .. } => { dbg!("CODE SECTION START"); }
+                    Payload::CodeSectionEntry(body) => {
+                        dbg!("CODE SECTION ENTRY");
+                    }
+                    _ => { dbg!("OTHER"); } 
                 }
-                buf.consume(consumed);
+                input_stream.consume(consumed);
             }
             Chunk::NeedMoreData(hint) => {
                 if eof {
                     bail!("unexpected end");
                 }
-                buf.reserve(hint as usize);
-                if buf.read_from(&mut stdin)? == 0 {
+                input_stream.reserve(hint as usize);
+                if input_stream.read_into_buf()? == 0 {
                     eof = true;
                 }
             }
         }
     }
+
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    // Step 1: parse input, and use Validator on every payload
+    
+    // PARSER stuff
+    let mut input_stream = get_input_stream();
+    let mut output_stream = get_output_stream();
+
+    compile_from_stream(&mut input_stream, &mut output_stream)?;
+    output_stream.flush()?;
+
+    Ok(())
 }
 
 // function to validate(?)
@@ -94,3 +125,18 @@ fn handle<T: WasmModuleResources>(
     reader.finish_expression(&func_validator.visitor(reader.original_position()))?;
     Ok(func_validator.into_allocations())
 }
+
+// code generation
+trait CodeGen {
+    fn codegen(&self, out: &mut impl Write) -> Result<()>;
+}
+
+impl CodeGen for FuncType {
+    fn codegen(&self, out: &mut impl Write) -> Result<()>{
+        let params = self.params();
+        let results = self.results();
+        writeln!(out, "{:?} -> {:?}", params, results)?;
+        Ok(())
+    }
+}
+

@@ -1,3 +1,6 @@
+// CURRENTLY SUPPORTS:
+// TYPES: i32, i64, f32, f64 -> uint32_t, uint64_t, float, double
+
 use anyhow::{Result, bail};
 use buffer_redux::{BufReader, BufWriter, Buffer, policy::ReaderPolicy};
 use std::{fmt::write, io::{BufRead, Read, Write, stdin, stdout}, fs::File};
@@ -17,8 +20,9 @@ fn get_input_stream() -> BufReader<impl Read> {
     BufReader::new_ringbuf(stdin())
 }
 
-fn get_output_stream() -> BufWriter<impl Write> {
-    BufWriter::new_ringbuf(stdout())
+fn get_output_stream() -> Result<BufWriter<impl Write>> {
+    let f = File::create("out.h")?;
+    Ok(BufWriter::new_ringbuf(f))
 }
 
 fn compile_from_stream(
@@ -48,8 +52,9 @@ fn compile_from_stream(
                     // Payload::Version
                     Payload::TypeSection(reader) => {
                         dbg!("TYPE");
-                        for ft in reader.into_iter_err_on_gc_types().flatten() {
-                            ft.codegen(output_stream)?;
+                        dbg!({reader.count()});
+                        for (i, ft) in reader.into_iter_err_on_gc_types().flatten().enumerate() {
+                            ft.codegen(output_stream, i)?;
                         }
                     }
                     Payload::ImportSection(_) => { 
@@ -88,12 +93,43 @@ fn compile_from_stream(
     Ok(())
 }
 
+fn print_includes(out: &mut impl Write) -> Result<()> {
+    let includes = ["<stdint.h>"];
+
+    for inc in includes {
+        writeln!(out, "#include {}", inc)?;
+    }
+    writeln!(out)?;
+
+    Ok(())
+}
+
+fn print_typedefs(out: &mut impl Write) -> Result<()> {
+    let typedefs = [
+        ("uint32_t", "u32"),
+        ("uint64_t", "u64"),
+        ("float", "f32"),
+        ("double", "f64"),
+    ];
+
+    for td in typedefs {
+        writeln!(out, "typedef {} {};", td.0, td.1)?;
+    }
+    writeln!(out)?;
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
     // Step 1: parse input, and use Validator on every payload
     
     // PARSER stuff
     let mut input_stream = get_input_stream();
-    let mut output_stream = get_output_stream();
+    let mut output_stream = get_output_stream()?;
+
+    // TYPEDEF stuff
+    print_includes(&mut output_stream)?;
+    print_typedefs(&mut output_stream)?;
 
     compile_from_stream(&mut input_stream, &mut output_stream)?;
     output_stream.flush()?;
@@ -128,14 +164,14 @@ fn handle<T: WasmModuleResources>(
 
 // code generation
 trait CodeGen {
-    fn codegen(&self, out: &mut impl Write) -> Result<()>;
+    fn codegen(&self, out: &mut impl Write, relative_position: usize) -> Result<()>;
 }
 
 impl CodeGen for FuncType {
-    fn codegen(&self, out: &mut impl Write) -> Result<()>{
+    fn codegen(&self, out: &mut impl Write, relative_position: usize) -> Result<()>{
         let params = self.params();
         let results = self.results();
-        writeln!(out, "{:?} -> {:?}", params, results)?;
+        writeln!(out, "f{relative_position}_{:?} -> {:?}", params, results)?;
         Ok(())
     }
 }

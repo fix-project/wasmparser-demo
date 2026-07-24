@@ -8,12 +8,8 @@ typedef double f64;
 class Module {
 
 public:
-i32 add(i32, i32);
-i32 accumulate(i32);
+i32 ilove7();
 
 private:
-i32 f1(i32, i32);
-i32 f2(i32);
-i32 f3(i32, i32);
-void f4();
+i32 f0();
 };

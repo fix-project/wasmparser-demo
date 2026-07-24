@@ -3,11 +3,13 @@
 // SINGLE RETURN VALUES
 // EXPORT: functions ONLY
 
-use anyhow::{Result, bail, anyhow};
+use color_eyre::eyre::{Result, bail};
 use buffer_redux::{BufReader, BufWriter};
 use std::{io::{BufRead, Read, Write, stdin, stdout}, fs::File};
 use wasmparser::{
-    Chunk, Export, ExternalKind, FuncToValidate, FuncType, FuncValidatorAllocations, FunctionBody, ModuleArity, Parser, Payload, TypeRef, ValType, ValidPayload, Validator, WasmModuleResources
+    Chunk, Export, ExternalKind, FuncToValidate, FuncType, FuncValidatorAllocations, FunctionBody, 
+    ModuleArity, Operator, Parser, Payload, TypeRef, ValType, ValidPayload, Validator, 
+    WasmModuleResources
 };
 
 static PUBLIC_STR: &'static str = "public:";
@@ -127,6 +129,9 @@ fn code_export(out: &mut FileOutput, export: Export, validator: &Validator) -> R
             print_fn_prototype(&mut out.header, export.name, params, results)?;
 
             // SOURCE FILE SHENANIGANS (just call the respective function)
+            print_fn_signature(&mut out.source, export.name, params, results)?;
+            writeln!(out.source, "return f{}();", export.index)?;
+            writeln!(out.source, "}};\n")?;
         },
         _ => {}, // TODO: other exports worry about later
     }
@@ -160,14 +165,32 @@ fn print_fn_prototype(
     Ok(())
 }
 
-// fn print_fn_signature(
-//     out: &mut impl Write,
-//     name: &str,
-//     params: &[ValType],
-//     results: &[ValType]
-// ) -> Result<()> {
-//
-// }
+fn print_fn_signature(
+    out: &mut impl Write,
+    name: &str,
+    params: &[ValType],
+    results: &[ValType]
+) -> Result<()> {
+    let cc_return = 
+        if results.is_empty() {
+            "void"
+        } else {
+            cc_type(&results[0]) // TODO multiple values
+        };
+
+    let mut cc_params = String::new();
+    for (i, ty) in params.iter().enumerate() {
+        if i > 0 {
+            cc_params += ", ";
+        }
+        cc_params += cc_type(ty);
+    }
+
+    // <return> f0(<param>, <param>);
+    writeln!(out, "{cc_return} Module::{name}({cc_params}) {{")?;
+
+    Ok(())
+}
 
 fn code_function<T: WasmModuleResources>(
     out: &mut FileOutput,
@@ -175,7 +198,7 @@ fn code_function<T: WasmModuleResources>(
     body: FunctionBody<'_>,
     allocs: FuncValidatorAllocations,
 ) -> Result<FuncValidatorAllocations> {
-    let func_validator = f.into_validator(allocs);
+    let mut func_validator = f.into_validator(allocs);
 
     // --- PRINT FUNCTION SIGNATURE ---
     let func_id = func_validator.index(); // function id
@@ -192,10 +215,45 @@ fn code_function<T: WasmModuleResources>(
     // f: function validator
     // - locals
     // - 
-    let reader = body.get_binary_reader();
+    print_fn_signature(&mut out.source, &name, params, results)?;
+    // let locals_reader = body.get_locals_reader()?;
+    // let mut ops_reader = body.get_binary_reader_for_operators()?;
+    
+    let mut reader = body.get_binary_reader();
+    func_validator.read_locals(&mut reader)?;
 
+    
+    while !reader.eof() {
+        // for depth in 0..func_validator.operand_stack_height() {
+        //     print!(" {:?}", func_validator.get_operand_type(depth as usize));
+        // }
+        // println!();
 
-    // type -> string
+        // let op = reader.visit_operator(&mut func_validator.visitor(reader.original_position()))??;
+        // dbg!(op);
+        //
+
+        let op = reader.peek_operator(&func_validator.visitor(reader.original_position()))?;
+
+        // consume the op
+        reader.visit_operator(&mut func_validator.visitor(reader.original_position()))??;
+
+        // STACK -> VARS
+        let n_stack = func_validator.operand_stack_height();
+        match op {
+            Operator::I32Const { value } => {
+                let n_var = n_stack - 1;
+                writeln!(out.source, "{} var_i{} = {};", cc_type(&ValType::I32), n_var, value)?;
+            },
+            _ => {},
+        }
+
+    }
+    reader.finish_expression(&func_validator.visitor(reader.original_position()))?;
+
+    writeln!(out.source, "return var_i0;")?;
+    writeln!(out.source, "}};\n")?;
+
     Ok(func_validator.into_allocations())
 }
 
@@ -251,7 +309,8 @@ fn print_program(
 
 fn main() -> Result<()> {
     // Step 1: parse input, and use Validator on every payload
-    
+    color_eyre::install()?; 
+
     // PARSER stuff
     let mut input_stream = get_input_stream();
     let mut output_stream: FileOutput = get_output_stream()?;
